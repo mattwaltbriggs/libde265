@@ -103,6 +103,8 @@ typedef enum {
   DE265_ERROR_NO_INITIAL_SLICE_HEADER=16,
   DE265_ERROR_PREMATURE_END_OF_SLICE=17,
   DE265_ERROR_UNSPECIFIED_DECODING_ERROR=18,
+  DE265_ERROR_IMAGE_SIZE_EXCEEDS_SECURITY_LIMIT=19,
+  DE265_ERROR_NAL_SIZE_EXCEEDS_SECURITY_LIMIT=20,
 
   // --- errors that should become obsolete in later libde265 versions ---
 
@@ -147,7 +149,9 @@ typedef enum {
   DE265_WARNING_BIT_DEPTH_OF_CURRENT_IMAGE_DOES_NOT_MATCH_SPS=1031,
   DE265_WARNING_REFERENCE_IMAGE_CHROMA_FORMAT_DOES_NOT_MATCH=1032,
   DE265_WARNING_INVALID_SLICE_HEADER_INDEX_ACCESS=1033,
-  DE265_WARNING_INVALID_TU_BLOCK_SPLIT=1034
+  DE265_WARNING_INVALID_TU_BLOCK_SPLIT=1034,
+  DE265_WARNING_RICE_PARAMETER_OUT_OF_RANGE=1035,
+  DE265_WARNING_MAX_NUMBER_OF_SEI_MESSAGES_EXCEEDED=1036
 } de265_error;
 
 LIBDE265_API const char* de265_get_error_text(de265_error err);
@@ -209,6 +213,17 @@ LIBDE265_API int de265_get_image_matrix_coefficients(const de265_image*);
 typedef void de265_decoder_context; // private structure
 
 
+/* Thread-safety:
+   A de265_decoder_context must not be accessed concurrently from multiple
+   threads. All API calls that take a de265_decoder_context (push data, decode,
+   query state, retrieve images, free) must be serialized by the caller.
+   To decode multiple streams in parallel, create one context per thread.
+
+   This is independent from de265_start_worker_threads(), which only enables
+   internal worker threads inside a single context to parallelize WPP/tile
+   decoding. Those internal threads are managed by libde265 and do not relax
+   the single-owner-thread requirement above.
+*/
 
 /* Get a new decoder context. Must be freed with de265_free_decoder(). */
 LIBDE265_API de265_decoder_context* de265_new_decoder(void);
@@ -427,6 +442,25 @@ LIBDE265_API void de265_set_parameter_int(de265_decoder_context*, de265_param pa
 /* Get decoding parameters. */
 LIBDE265_API int  de265_get_parameter_bool(de265_decoder_context*, de265_param param);
 
+
+/* --- security limits --- */
+
+typedef struct de265_security_limits {
+  uint8_t version;
+
+  // --- version 1 ---
+
+  uint32_t max_image_size_pixels;
+  uint32_t max_NAL_size_bytes;
+  uint32_t max_SEI_messages;   // max number of SEI messages per access unit (0 = unlimited)
+
+} de265_security_limits;
+
+LIBDE265_API de265_security_limits* de265_get_security_limits(de265_decoder_context*);
+
+LIBDE265_API void de265_set_security_limits(de265_decoder_context*, const de265_security_limits* limits);
+
+LIBDE265_API const de265_security_limits* de265_get_disabled_security_limits();
 
 
 /* --- optional library initialization --- */

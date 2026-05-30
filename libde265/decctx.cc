@@ -41,8 +41,8 @@
 #include "x86/sse.h"
 #endif
 
-#ifdef HAVE_ARM
-#include "arm/arm.h"
+#ifdef HAVE_ARM32
+#include "arm32/arm.h"
 #endif
 
 #define SAVE_INTERMEDIATE_IMAGES 0
@@ -133,6 +133,7 @@ base_context::base_context()
 decoder_context::decoder_context()
 {
   param_image_allocation_functions = de265_image::default_image_allocation;
+  nal_parser.set_security_limits(&param_security_limits);
   compute_framedrop_table();
 }
 
@@ -249,7 +250,7 @@ void base_context::set_acceleration_functions(enum de265_acceleration l)
     init_acceleration_functions_sse(&acceleration);
   }
 #endif
-#ifdef HAVE_ARM
+#ifdef HAVE_ARM32
   if (l>=de265_acceleration_ARM) {
     init_acceleration_functions_arm(&acceleration);
   }
@@ -301,7 +302,7 @@ void decoder_context::init_thread_context(thread_context* tctx)
 
 void decoder_context::add_task_decode_CTB_row(thread_context* tctx,
                                               bool firstSliceSubstream,
-                                              int ctbRow)
+                                              uint16_t ctbRow)
 {
   thread_task_ctb_row* task = new thread_task_ctb_row;
   task->firstSliceSubstream = firstSliceSubstream;
@@ -316,7 +317,7 @@ void decoder_context::add_task_decode_CTB_row(thread_context* tctx,
 
 
 void decoder_context::add_task_decode_slice_segment(thread_context* tctx, bool firstSliceSubstream,
-                                                    int ctbx,int ctby)
+                                                    uint16_t ctbx, uint16_t ctby)
 {
   thread_task_slice_segment* task = new thread_task_slice_segment;
   task->firstSliceSubstream = firstSliceSubstream;
@@ -413,6 +414,14 @@ de265_error decoder_context::read_sei_NAL(bitreader& reader, bool suffix)
     dump_sei(&sei, current_sps.get());
 
     if (image_units.empty()==false && suffix) {
+      uint32_t max_SEI_messages = param_security_limits.max_SEI_messages;
+      if (max_SEI_messages != 0 &&
+          image_units.back()->suffix_SEIs.size() >= max_SEI_messages) {
+        // too many SEI messages for this access unit -> drop to bound memory usage
+        add_warning(DE265_WARNING_MAX_NUMBER_OF_SEI_MESSAGES_EXCEEDED, false);
+        return DE265_WARNING_MAX_NUMBER_OF_SEI_MESSAGES_EXCEEDED;
+      }
+
       image_units.back()->suffix_SEIs.push_back(sei);
     }
   }
@@ -466,7 +475,7 @@ de265_error decoder_context::read_slice_NAL(bitreader& reader, NAL_unit* nal, na
   // modify entry_point_offsets
 
   uint32_t headerLength = reader.data - nal->data();
-  for (int i=0;i<shdr->num_entry_point_offsets;i++) {
+  for (uint32_t i=0;i<shdr->num_entry_point_offsets;i++) {
     uint32_t skipped = nal->num_skipped_bytes_before(shdr->entry_point_offset[i],
                                                      headerLength);
     if (skipped > shdr->entry_point_offset[i]) {
@@ -477,10 +486,6 @@ de265_error decoder_context::read_slice_NAL(bitreader& reader, NAL_unit* nal, na
     }
     shdr->entry_point_offset[i] -= skipped;
   }
-
-  this->img->add_slice_segment_header(shdr);
-
-
 
   // --- start a new image if this is the first slice ---
 
@@ -495,6 +500,13 @@ de265_error decoder_context::read_slice_NAL(bitreader& reader, NAL_unit* nal, na
 
   if ( ! image_units.empty() ) {
 
+    // Hand the slice header to the picture (which takes ownership and frees it
+    // on release). Only do this when there is an active image unit to decode
+    // the slice; otherwise the header would be retained on img->slices forever,
+    // which a crafted stream of non-first slice NALs can exploit to grow memory
+    // without bound.
+    this->img->add_slice_segment_header(shdr);
+
     slice_unit* sliceunit = new slice_unit(this);
     sliceunit->nal = nal;
     sliceunit->shdr = shdr;
@@ -507,6 +519,7 @@ de265_error decoder_context::read_slice_NAL(bitreader& reader, NAL_unit* nal, na
   }
   else {
     nal_parser.free_NAL_unit(nal);
+    delete shdr;
   }
 
   bool did_work;
@@ -660,6 +673,7 @@ de265_error decoder_context::decode_slice_unit_sequential(image_unit* imgunit,
   if (imgunit->img->get_pps().entropy_coding_sync_enabled_flag &&
       sliceunit->shdr->first_slice_segment_in_pic_flag) {
     imgunit->ctx_models.resize( (img->get_sps().PicHeightInCtbsY-1) ); //* CONTEXT_MODEL_TABLE_LENGTH );
+    imgunit->StatCoeff_models.assign( (img->get_sps().PicHeightInCtbsY-1), {{0,0,0,0}} );
   }
 
   sliceunit->nThreads=1;
@@ -809,8 +823,8 @@ de265_error decoder_context::decode_slice_unit_WPP(image_unit* imgunit,
   slice_segment_header* shdr = sliceunit->shdr;
   const pic_parameter_set& pps = img->get_pps();
 
-  int nRows = shdr->num_entry_point_offsets +1;
-  int ctbsWidth = img->get_sps().PicWidthInCtbsY;
+  uint16_t nRows = shdr->num_entry_point_offsets +1;
+  uint16_t ctbsWidth = img->get_sps().PicWidthInCtbsY;
 
 
   assert(img->num_threads_active() == 0);
@@ -821,6 +835,7 @@ de265_error decoder_context::decode_slice_unit_WPP(image_unit* imgunit,
   if (shdr->first_slice_segment_in_pic_flag) {
     // reserve space for nRows-1 because we don't need to save the CABAC model in the last CTB row
     imgunit->ctx_models.resize( (img->get_sps().PicHeightInCtbsY-1) ); //* CONTEXT_MODEL_TABLE_LENGTH );
+    imgunit->StatCoeff_models.assign( (img->get_sps().PicHeightInCtbsY-1), {{0,0,0,0}} );
   }
 
 
@@ -828,10 +843,14 @@ de265_error decoder_context::decode_slice_unit_WPP(image_unit* imgunit,
 
 
   // first CTB in this slice
-  int ctbAddrRS = shdr->slice_segment_address;
-  int ctbRow    = ctbAddrRS / ctbsWidth;
+  uint32_t ctbAddrRS = shdr->slice_segment_address;
+  uint16_t ctbRow    = ctbAddrRS / ctbsWidth;
 
-  for (int entryPt=0;entryPt<nRows;entryPt++) {
+  if (ctbRow + nRows > img->get_sps().PicHeightInCtbsY) {
+    return DE265_WARNING_SLICEHEADER_INVALID;
+  }
+
+  for (uint16_t entryPt=0;entryPt<nRows;entryPt++) {
     // entry points other than the first start at CTB rows
     if (entryPt>0) {
       ctbRow++;
@@ -857,6 +876,11 @@ de265_error decoder_context::decode_slice_unit_WPP(image_unit* imgunit,
     tctx->img     = img;
     tctx->imgunit = imgunit;
     tctx->sliceunit= sliceunit;
+
+    if (ctbAddrRS >= pps.CtbAddrRStoTS.size()) {
+      err = DE265_WARNING_SLICEHEADER_INVALID;
+      break;
+    }
     tctx->CtbAddrInTS = pps.CtbAddrRStoTS[ctbAddrRS];
 
     init_thread_context(tctx);
@@ -922,8 +946,8 @@ de265_error decoder_context::decode_slice_unit_tiles(image_unit* imgunit,
   slice_segment_header* shdr = sliceunit->shdr;
   const pic_parameter_set& pps = img->get_pps();
 
-  int nTiles = shdr->num_entry_point_offsets +1;
-  int ctbsWidth = img->get_sps().PicWidthInCtbsY;
+  uint16_t nTiles = shdr->num_entry_point_offsets +1;
+  uint16_t ctbsWidth = img->get_sps().PicWidthInCtbsY;
 
 
   assert(img->num_threads_active() == 0);
@@ -932,10 +956,16 @@ de265_error decoder_context::decode_slice_unit_tiles(image_unit* imgunit,
 
 
   // first CTB in this slice
-  int ctbAddrRS = shdr->slice_segment_address;
+  uint32_t ctbAddrRS = shdr->slice_segment_address;
+
+  // pps.TileIdRS and pps.CtbAddrRStoTS are both sized to PicSizeInCtbsY in
+  // set_derived_values(), so one bound covers both accesses below.
+  if (ctbAddrRS >= pps.CtbAddrRStoTS.size()) {
+    return DE265_WARNING_SLICEHEADER_INVALID;
+  }
   int tileID = pps.TileIdRS[ctbAddrRS];
 
-  for (int entryPt=0;entryPt<nTiles;entryPt++) {
+  for (uint16_t entryPt=0;entryPt<nTiles;entryPt++) {
     // entry points other than the first start at tile beginnings
     if (entryPt>0) {
       tileID++;
@@ -945,9 +975,14 @@ de265_error decoder_context::decode_slice_unit_tiles(image_unit* imgunit,
         break;
       }
 
-      int ctbX = pps.colBd[tileID % pps.num_tile_columns];
-      int ctbY = pps.rowBd[tileID / pps.num_tile_columns];
+      uint16_t ctbX = pps.colBd[tileID % pps.num_tile_columns];
+      uint16_t ctbY = pps.rowBd[tileID / pps.num_tile_columns];
       ctbAddrRS = ctbY * ctbsWidth + ctbX;
+
+      if (ctbAddrRS >= pps.CtbAddrRStoTS.size()) {
+        err = DE265_WARNING_SLICEHEADER_INVALID;
+        break;
+      }
     }
 
     // set thread context
@@ -989,8 +1024,8 @@ de265_error decoder_context::decode_slice_unit_tiles(image_unit* imgunit,
     img->thread_start(1);
     sliceunit->nThreads++;
     add_task_decode_slice_segment(tctx, entryPt==0,
-                                  ctbAddrRS % ctbsWidth,
-                                  ctbAddrRS / ctbsWidth);
+                                  static_cast<uint16_t>(ctbAddrRS % ctbsWidth),
+                                  static_cast<uint16_t>(ctbAddrRS / ctbsWidth));
   }
 
   img->wait_for_completion();

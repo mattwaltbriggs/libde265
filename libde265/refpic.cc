@@ -86,7 +86,7 @@ bool read_short_term_ref_pic_set(error_queue* errqueue,
                                  const seq_parameter_set* sps,
                                  bitreader* br,
                                  ref_pic_set* out_set, // where to store the read set
-                                 int idxRps,  // index of the set to be read
+                                 uint32_t idxRps,  // index of the set to be read
                                  const std::vector<ref_pic_set>& sets, // previously read sets
                                  bool sliceRefPicSet) // is this in the slice header?
 {
@@ -109,16 +109,13 @@ bool read_short_term_ref_pic_set(error_queue* errqueue,
     /* Only for the last ref_pic_set (that's the one coded in the slice header),
        we can specify relative to which reference set we code the set. */
 
-    int delta_idx;
+    uint32_t delta_idx;
     if (sliceRefPicSet) { // idxRps == num_short_term_ref_pic_sets) {
-      delta_idx = vlc = br->get_uvlc();
-      if (vlc==UVLC_ERROR) {
+      vlc = br->get_uvlc();
+      if (vlc==UVLC_ERROR || vlc >= idxRps) {
         return false;
       }
-
-      if (delta_idx>=idxRps) {
-        return false;
-      }
+      delta_idx = vlc;
 
       delta_idx++;
     } else {
@@ -325,6 +322,22 @@ bool read_short_term_ref_pic_set(error_queue* errqueue,
 
   out_set->compute_derived_values();
 
+  // The unused short-term references are all collected into a single PocStFoll array
+  // of MAX_NUM_REF_PICS entries (see decoder_context::process_reference_picture_set).
+  // While each individual list is bounded above, the predicted-RPS construction can
+  // append the current-picture delta to an already-full source set, pushing the
+  // combined count past MAX_NUM_REF_PICS. Reject such sets to avoid an out-of-bounds
+  // write when filling PocStFoll.
+  if (out_set->NumDeltaPocs > MAX_NUM_REF_PICS) {
+    out_set->NumNegativePics = 0;
+    out_set->NumPositivePics = 0;
+    out_set->NumDeltaPocs = 0;
+    out_set->NumPocTotalCurr_shortterm_only = 0;
+
+    errqueue->add_warning(DE265_WARNING_MAX_NUM_REF_PICS_EXCEEDED, false);
+    return false;
+  }
+
   return true;
 }
 
@@ -333,7 +346,7 @@ bool write_short_term_ref_pic_set_nopred(error_queue* errqueue,
                                          const seq_parameter_set* sps,
                                          CABAC_encoder& out,
                                          const ref_pic_set* in_set, // which set to write
-                                         int idxRps,  // index of the set to be written
+                                         uint32_t idxRps,  // index of the set to be written
                                          const std::vector<ref_pic_set>& sets, // previously read sets
                                          bool sliceRefPicSet) // is this in the slice header?
 {
@@ -384,7 +397,7 @@ bool write_short_term_ref_pic_set(error_queue* errqueue,
                                   const seq_parameter_set* sps,
                                   CABAC_encoder& out,
                                   const ref_pic_set* in_set, // which set to write
-                                  int idxRps,  // index of the set to be read
+                                  uint32_t idxRps,  // index of the set to be read
                                   const std::vector<ref_pic_set>& sets, // previously read sets
                                   bool sliceRefPicSet) // is this in the slice header?
 {
