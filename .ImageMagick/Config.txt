@@ -41,6 +41,6 @@ libde265\de265-version.h -> libde265
 [EXCLUDES]
 dec265\
 fuzzing\
-libde265\arm\
+libde265\arm32\
 libde265\x86\
 sherlock265\
