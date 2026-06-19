@@ -113,15 +113,17 @@ static void fill_scan_pos_table(scan_position* pos, int scanIdx, int log2TrafoSi
   const position* ScanOrderSub = get_scan_order(log2TrafoSize-2, scanIdx);
   const position* ScanOrderPos = get_scan_order(2, scanIdx);
 
-  for (int sb = 0; sb < numSubBlocks; sb++) {
-    position S = ScanOrderSub[sb];
-    for (int sp = 0; sp < 16; sp++) {
-      int xC = (S.x<<2) + ScanOrderPos[sp].x;
-      int yC = (S.y<<2) + ScanOrderPos[sp].y;
-      pos[yC * blkSize + xC].subBlock = sb;
-      pos[yC * blkSize + xC].scanPos  = sp;
+  for (int sb = 0; sb < numSubBlocks; sb++)
+    {
+      position S = ScanOrderSub[sb];
+      for (int sp = 0; sp < 16; sp++)
+        {
+          int xC = (S.x<<2) + ScanOrderPos[sp].x;
+          int yC = (S.y<<2) + ScanOrderPos[sp].y;
+          pos[yC * blkSize + xC].subBlock = sb;
+          pos[yC * blkSize + xC].scanPos  = sp;
+        }
     }
-  }
 }
 
 

@@ -250,6 +250,18 @@ void base_context::set_acceleration_functions(enum de265_acceleration l)
     init_acceleration_functions_sse(&acceleration);
   }
 #endif
+#if HAVE_AVX2
+  // layered on top of SSE: overrides a few transform kernels (runtime-checked)
+  if (l>=de265_acceleration_AVX2) {
+    init_acceleration_functions_avx2(&acceleration);
+  }
+#endif
+#if HAVE_AVX512
+  // layered on top of AVX2: overrides the 32x32 transform (runtime-checked)
+  if (l>=de265_acceleration_AVX2) {
+    init_acceleration_functions_avx512(&acceleration);
+  }
+#endif
 #ifdef HAVE_ARM32
   if (l>=de265_acceleration_ARM) {
     init_acceleration_functions_arm(&acceleration);
@@ -277,7 +289,7 @@ void decoder_context::init_thread_context(thread_context* tctx)
 
 
   if (tctx->shdr->slice_segment_address > 0) {
-    int prevCtb = pps.CtbAddrTStoRS[ pps.CtbAddrRStoTS[tctx->shdr->slice_segment_address] -1 ];
+    int prevCtb = pps.scan->CtbAddrTStoRS[ pps.scan->CtbAddrRStoTS[tctx->shdr->slice_segment_address] -1 ];
 
     int ctbX = prevCtb % sps.PicWidthInCtbsY;
     int ctbY = prevCtb / sps.PicWidthInCtbsY;
@@ -493,6 +505,12 @@ de265_error decoder_context::read_slice_NAL(bitreader& reader, NAL_unit* nal, na
     image_unit* imgunit = new image_unit;
     imgunit->img = this->img;
     image_units.push_back(imgunit);
+
+    // A new picture starts here. Drop the reference to the previous picture's
+    // slice header, whose storage may be released independently of this decoder
+    // state. Dependent slices only ever reference a preceding slice header
+    // within the same picture, which is set below as slices are retained.
+    previous_slice_header = nullptr;
   }
 
 
@@ -506,6 +524,11 @@ de265_error decoder_context::read_slice_NAL(bitreader& reader, NAL_unit* nal, na
     // which a crafted stream of non-first slice NALs can exploit to grow memory
     // without bound.
     this->img->add_slice_segment_header(shdr);
+
+    // The header is now owned by the image and stays alive at least until the
+    // image is released, so it is safe for a following dependent slice to copy
+    // from it. Only retained headers may become 'previous_slice_header'.
+    previous_slice_header = shdr;
 
     slice_unit* sliceunit = new slice_unit(this);
     sliceunit->nal = nal;
@@ -644,7 +667,7 @@ de265_error decoder_context::decode_slice_unit_sequential(image_unit* imgunit,
 
   remove_images_from_dpb(sliceunit->shdr->RemoveReferencesList);
 
-  if (sliceunit->shdr->slice_segment_address >= imgunit->img->get_pps().CtbAddrRStoTS.size()) {
+  if (sliceunit->shdr->slice_segment_address >= imgunit->img->get_pps().scan->CtbAddrRStoTS.size()) {
     return DE265_ERROR_CTB_OUTSIDE_IMAGE_AREA;
   }
 
@@ -656,7 +679,7 @@ de265_error decoder_context::decode_slice_unit_sequential(image_unit* imgunit,
   tctx.decctx = this;
   tctx.imgunit = imgunit;
   tctx.sliceunit= sliceunit;
-  tctx.CtbAddrInTS = imgunit->img->get_pps().CtbAddrRStoTS[tctx.shdr->slice_segment_address];
+  tctx.CtbAddrInTS = imgunit->img->get_pps().scan->CtbAddrRStoTS[tctx.shdr->slice_segment_address];
   tctx.task = nullptr;
 
   init_thread_context(&tctx);
@@ -877,11 +900,11 @@ de265_error decoder_context::decode_slice_unit_WPP(image_unit* imgunit,
     tctx->imgunit = imgunit;
     tctx->sliceunit= sliceunit;
 
-    if (ctbAddrRS >= pps.CtbAddrRStoTS.size()) {
+    if (ctbAddrRS >= pps.scan->CtbAddrRStoTS.size()) {
       err = DE265_WARNING_SLICEHEADER_INVALID;
       break;
     }
-    tctx->CtbAddrInTS = pps.CtbAddrRStoTS[ctbAddrRS];
+    tctx->CtbAddrInTS = pps.scan->CtbAddrRStoTS[ctbAddrRS];
 
     init_thread_context(tctx);
 
@@ -958,12 +981,12 @@ de265_error decoder_context::decode_slice_unit_tiles(image_unit* imgunit,
   // first CTB in this slice
   uint32_t ctbAddrRS = shdr->slice_segment_address;
 
-  // pps.TileIdRS and pps.CtbAddrRStoTS are both sized to PicSizeInCtbsY in
+  // pps.scan->TileIdRS and pps.scan->CtbAddrRStoTS are both sized to PicSizeInCtbsY in
   // set_derived_values(), so one bound covers both accesses below.
-  if (ctbAddrRS >= pps.CtbAddrRStoTS.size()) {
+  if (ctbAddrRS >= pps.scan->CtbAddrRStoTS.size()) {
     return DE265_WARNING_SLICEHEADER_INVALID;
   }
-  int tileID = pps.TileIdRS[ctbAddrRS];
+  int tileID = pps.scan->TileIdRS[ctbAddrRS];
 
   for (uint16_t entryPt=0;entryPt<nTiles;entryPt++) {
     // entry points other than the first start at tile beginnings
@@ -979,7 +1002,7 @@ de265_error decoder_context::decode_slice_unit_tiles(image_unit* imgunit,
       uint16_t ctbY = pps.rowBd[tileID / pps.num_tile_columns];
       ctbAddrRS = ctbY * ctbsWidth + ctbX;
 
-      if (ctbAddrRS >= pps.CtbAddrRStoTS.size()) {
+      if (ctbAddrRS >= pps.scan->CtbAddrRStoTS.size()) {
         err = DE265_WARNING_SLICEHEADER_INVALID;
         break;
       }
@@ -994,7 +1017,7 @@ de265_error decoder_context::decode_slice_unit_tiles(image_unit* imgunit,
     tctx->img    = img;
     tctx->imgunit = imgunit;
     tctx->sliceunit= sliceunit;
-    tctx->CtbAddrInTS = pps.CtbAddrRStoTS[ctbAddrRS];
+    tctx->CtbAddrInTS = pps.scan->CtbAddrRStoTS[ctbAddrRS];
 
     init_thread_context(tctx);
 
@@ -1606,7 +1629,7 @@ de265_error decoder_context::process_reference_picture_set(slice_segment_header*
 bool decoder_context::construct_reference_picture_lists(slice_segment_header* hdr)
 {
   int NumPocTotalCurr = hdr->NumPocTotalCurr;
-  int NumRpsCurrTempList0 = libde265_max(hdr->num_ref_idx_l0_active, NumPocTotalCurr);
+  int NumRpsCurrTempList0 = std::max((int)hdr->num_ref_idx_l0_active, NumPocTotalCurr);
 
   // TODO: fold code for both lists together
 
@@ -1678,7 +1701,7 @@ bool decoder_context::construct_reference_picture_lists(slice_segment_header* hd
   */
 
   if (hdr->slice_type == SLICE_TYPE_B) {
-    int NumRpsCurrTempList1 = libde265_max(hdr->num_ref_idx_l1_active, NumPocTotalCurr);
+    int NumRpsCurrTempList1 = std::max((int)hdr->num_ref_idx_l1_active, NumPocTotalCurr);
 
     int rIdx=0;
     while (rIdx < NumRpsCurrTempList1) {
@@ -2001,7 +2024,9 @@ bool decoder_context::process_slice_segment_header(slice_segment_header* hdr,
     hdr->SliceAddrRS = previous_slice_header->SliceAddrRS;
   }
 
-  previous_slice_header = hdr;
+  // Note: previous_slice_header is updated by the caller (read_slice_NAL) only
+  // once the slice header is actually retained by the image. Setting it here
+  // would leave a dangling pointer when the caller discards/deletes 'hdr'.
 
 
   loginfo(LogHeaders,"SliceAddrRS = %d\n",hdr->SliceAddrRS);

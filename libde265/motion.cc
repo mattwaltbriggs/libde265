@@ -50,7 +50,7 @@ void mc_luma(const base_context* ctx,
              const seq_parameter_set* sps, int mv_x, int mv_y,
              int xP,int yP,
              int16_t* out, int out_stride,
-             const pixel_t* ref, int ref_stride,
+             const pixel_t* ref, ptrdiff_t ref_stride,
              int nPbW, int nPbH, int bitDepth_L)
 {
   int xFracL = mv_x & 3;
@@ -63,7 +63,7 @@ void mc_luma(const base_context* ctx,
 
   //const int shift1 = sps->BitDepth_Y-8;
   //const int shift2 = 6;
-  const int shift3 = 14 - sps->BitDepth_Y;
+  const int shift3 = std::max(2, 14 - sps->BitDepth_Y);
 
   int w = sps->pic_width_in_luma_samples;
   int h = sps->pic_height_in_luma_samples;
@@ -129,7 +129,7 @@ void mc_luma(const base_context* ctx,
     pixel_t padbuf[(MAX_CU_SIZE+16)*(MAX_CU_SIZE+7)];
 
     const pixel_t* src_ptr;
-    int src_stride;
+    ptrdiff_t src_stride;
 
     if (-extra_left + xIntOffsL >= 0 &&
         -extra_top  + yIntOffsL >= 0 &&
@@ -181,14 +181,14 @@ void mc_chroma(const base_context* ctx,
                int mv_x, int mv_y,
                int xP,int yP,
                int16_t* out, int out_stride,
-               const pixel_t* ref, int ref_stride,
+               const pixel_t* ref, ptrdiff_t ref_stride,
                int nPbWC, int nPbHC, int bit_depth_C)
 {
   // chroma sample interpolation process (8.5.3.2.2.2)
 
   //const int shift1 = sps->BitDepth_C-8;
   //const int shift2 = 6;
-  const int shift3 = 14 - sps->BitDepth_C;
+  const int shift3 = std::max(2, 14 - sps->BitDepth_C);
 
   int wC = sps->pic_width_in_luma_samples /sps->SubWidthC;
   int hC = sps->pic_height_in_luma_samples/sps->SubHeightC;
@@ -227,7 +227,7 @@ void mc_chroma(const base_context* ctx,
     pixel_t padbuf[(MAX_CU_SIZE+16)*(MAX_CU_SIZE+3)];
 
     const pixel_t* src_ptr;
-    int src_stride;
+    ptrdiff_t src_stride;
 
     int extra_top  = 1;
     int extra_left = 1;
@@ -453,9 +453,9 @@ void generate_inter_prediction_samples(base_context* ctx,
 
   // weighted sample prediction  (8.5.3.2.3)
 
-  const int shift1_L = libde265_max(2,14-sps->BitDepth_Y);
+  const int shift1_L = std::max(2,14-sps->BitDepth_Y);
   const int offset_shift1_L = img->get_sps().WpOffsetBdShiftY;
-  const int shift1_C = libde265_max(2,14-sps->BitDepth_C);
+  const int shift1_C = std::max(2,14-sps->BitDepth_C);
   const int offset_shift1_C = img->get_sps().WpOffsetBdShiftC;
 
   /*
@@ -1074,7 +1074,7 @@ void derive_zero_motion_vector_candidates(const slice_segment_header* shdr,
     numRefIdx = shdr->num_ref_idx_l0_active;
   }
   else {
-    numRefIdx = libde265_min(shdr->num_ref_idx_l0_active,
+    numRefIdx = std::min(shdr->num_ref_idx_l0_active,
                              shdr->num_ref_idx_l1_active);
   }
 
@@ -1128,12 +1128,12 @@ bool scale_mv(MotionVector* out_mv, MotionVector mv, int colDist, int currDist)
     return false;
   }
   else {
-    int tx = (16384 + (abs_value(td)>>1)) / td;
+    int tx = (16384 + (std::abs(td)>>1)) / td;
     int distScaleFactor = Clip3(-4096,4095, (tb*tx+32)>>6);
     out_mv->x = Clip3(-32768,32767,
-                      Sign(distScaleFactor*mv.x)*((abs_value(distScaleFactor*mv.x)+127)>>8));
+                      Sign(distScaleFactor*mv.x)*((std::abs(distScaleFactor*mv.x)+127)>>8));
     out_mv->y = Clip3(-32768,32767,
-                      Sign(distScaleFactor*mv.y)*((abs_value(distScaleFactor*mv.y)+127)>>8));
+                      Sign(distScaleFactor*mv.y)*((std::abs(distScaleFactor*mv.y)+127)>>8));
     return true;
   }
 }

@@ -25,9 +25,18 @@
 #include "x86/sse.h"
 #include "x86/sse-motion.h"
 #include "x86/sse-dct.h"
+#include "x86/sse-intrapred.h"
+#include "x86/sse-deblk.h"
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
+#endif
+
+#if HAVE_AVX2
+#include "x86/transform-avx2.h"
+#endif
+#if HAVE_AVX512
+#include "x86/transform-avx512.h"
 #endif
 
 #if defined(__GNUC__) && !defined(__EMSCRIPTEN__)
@@ -109,7 +118,55 @@ void init_acceleration_functions_sse(struct acceleration_functions* accel)
     accel->transform_add_8[1] = ff_hevc_transform_8x8_add_8_sse4;
     accel->transform_add_8[2] = ff_hevc_transform_16x16_add_8_sse4;
     accel->transform_add_8[3] = ff_hevc_transform_32x32_add_8_sse4;
+
+    accel->add_residual_8  = add_residual_8_sse4;
+    accel->add_residual_16 = add_residual_16_sse4;
+    accel->dequant_coeff_block = dequant_coeff_block_sse4;
+
+    accel->intra_pred_dc_8      = intra_pred_dc_8_sse4;
+    accel->intra_pred_planar_8  = intra_pred_planar_8_sse4;
+    accel->intra_pred_angular_8 = intra_pred_angular_8_sse4;
+
+    accel->deblock_luma_8   = deblock_luma_8_sse4;
+    // chroma deblock stays on the scalar fallback: the filter is too cheap to
+    // amortize the SIMD load/transpose/scatter overhead (SSE measured slower).
   }
+#endif
+}
+
+
+void init_acceleration_functions_avx2(struct acceleration_functions* accel)
+{
+#if HAVE_AVX2
+  // __builtin_cpu_supports("avx2") handles the OSXSAVE / XGETBV (YMM-enabled)
+  // checks internally, so this is safe to call on any CPU. This TU is *not*
+  // compiled with -mavx2, so reaching here never executes an AVX2 instruction.
+#if defined(__GNUC__) && !defined(__EMSCRIPTEN__)
+  __builtin_cpu_init();
+  if (__builtin_cpu_supports("avx2")) {
+    accel->transform_add_8[2] = transform_16x16_add_8_avx2;
+    accel->transform_add_8[3] = transform_32x32_add_8_avx2;
+    // NB: dequant intentionally stays on the SSE version. An AVX2 variant was
+    // implemented and benchmarked, but inverse quantization is scatter-bound, so
+    // the wider arithmetic gave no benefit and AVX2 measured actually slightly
+    // slower than SSE. (AVX-512 would be no better, for the same reason.)
+  }
+#endif
+#endif
+}
+
+
+void init_acceleration_functions_avx512(struct acceleration_functions* accel)
+{
+#if HAVE_AVX512
+#if defined(__GNUC__) && !defined(__EMSCRIPTEN__)
+  __builtin_cpu_init();
+  // need AVX-512F + AVX-512BW (16-bit ops). __builtin_cpu_supports handles the
+  // OS (XCR0/ZMM-enabled) check. This TU is not compiled with -mavx512*.
+  if (__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw")) {
+    accel->transform_add_8[3] = transform_32x32_add_8_avx512;
+  }
+#endif
 #endif
 }
 

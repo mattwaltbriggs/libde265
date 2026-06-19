@@ -221,8 +221,10 @@ LIBDE265_API de265_error de265_init()
   // do initializations
 
   init_scan_orders();
+  pps_scan_cache_init();
 
   if (!alloc_and_init_significant_coeff_ctxIdx_lookupTable()) {
+    pps_scan_cache_free();
     de265_init_count--;
     return DE265_ERROR_LIBRARY_INITIALIZATION_FAILED;
   }
@@ -242,6 +244,7 @@ LIBDE265_API de265_error de265_free()
 
   if (de265_init_count==0) {
     free_significant_coeff_ctxIdx_lookupTable();
+    pps_scan_cache_free();
   }
 
   return DE265_OK;
@@ -729,7 +732,7 @@ LIBDE265_API const uint8_t* de265_get_image_plane(const de265_image* img, int ch
 
   uint8_t* data = img->pixels_confwin[channel];
 
-  if (stride) *stride = img->get_image_stride(channel) * ((de265_get_bits_per_pixel(img, channel)+7) / 8);
+  if (stride) *stride = static_cast<int>(img->get_image_stride(channel) * ((de265_get_bits_per_pixel(img, channel)+7) / 8));
 
   return data;
 }

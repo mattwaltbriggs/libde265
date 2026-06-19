@@ -2,7 +2,7 @@ cmake_minimum_required (VERSION 3.16.3)
 
 project (libde265
     LANGUAGES C CXX
-    VERSION 1.1.0
+    VERSION 1.1.1
 )
 
 # Auto-compute BCD-encoded numeric version from project version.
@@ -35,7 +35,7 @@ set (PACKAGE_VERSION ${PROJECT_VERSION})
 # Programs linked against libde265.so.0 will work with any libde265.so.0.x.y.
 #
 set(DE265_SOVERSION 0)
-set(DE265_LIBRARY_VERSION "0.2.0")
+set(DE265_LIBRARY_VERSION "0.2.1")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -74,6 +74,8 @@ CHECK_INCLUDE_FILE(malloc.h HAVE_MALLOC_H)
 CHECK_FUNCTION_EXISTS(posix_memalign HAVE_POSIX_MEMALIGN)
 
 option(ENABLE_SIMD "Enable SIMD acceleration (SSE on x86, NEON on ARM)" ON)
+option(ENABLE_AVX2 "Enable AVX2 kernels on x86 (in addition to SSE)" ON)
+option(ENABLE_AVX512 "Enable AVX-512 kernels on x86 (in addition to AVX2)" ON)
 
 include(CheckCSourceCompiles)
 if(ENABLE_SIMD)
@@ -95,9 +97,19 @@ if(ENABLE_SIMD)
       check_c_compiler_flag(-msse2 SUPPORTS_SSE2)
       check_c_compiler_flag(-mssse3 SUPPORTS_SSSE3)
       check_c_compiler_flag(-msse4.1 SUPPORTS_SSE4_1)
+      check_c_compiler_flag(-mavx2 SUPPORTS_AVX2)
+      check_c_compiler_flag("-mavx512f -mavx512bw" SUPPORTS_AVX512)
     endif()
     if(SUPPORTS_SSE4_1)
       set(HAVE_SSE4_1 TRUE)
+    endif()
+    # AVX2 kernels back the SSE4.1 ones; only built on 64-bit targets.
+    if(ENABLE_AVX2 AND SUPPORTS_AVX2 AND HAVE_SSE4_1 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+      set(HAVE_AVX2 TRUE)
+    endif()
+    # AVX-512 (F+BW) kernels back the AVX2 ones.
+    if(ENABLE_AVX512 AND SUPPORTS_AVX512 AND HAVE_AVX2)
+      set(HAVE_AVX512 TRUE)
     endif()
   endif()
 
@@ -183,6 +195,47 @@ set(FUZZING_SANITIZER_OPTIONS "-fsanitize=address,shift,integer" "-fno-sanitize=
 if (WITH_FUZZERS)
   add_compile_options("-fsanitize=fuzzer-no-link" ${FUZZING_SANITIZER_OPTIONS})
   add_link_options(${FUZZING_SANITIZER_OPTIONS})
+endif()
+
+# --- Symbol visibility -------------------------------------------------------
+#
+# Hiding the library's non-API symbols turns cross-translation-unit calls inside
+# libde265 from indirect PLT/GOT dispatch into direct calls — a measurable win
+# on the hot CABAC decode path — and shrinks the dynamic symbol table. Only the
+# symbols tagged LIBDE265_API (the public de265_*/en265_* C API) stay exported.
+#
+# By default we reduce visibility for optimized (non-Debug) builds and keep
+# every symbol exported for Debug builds, so a debug build stays fully available
+# for introspection. The encoder CLI, sherlock265 and the dev tools all link
+# against *internal* (non-API) symbols of the library, so hiding would break
+# their link; visibility is therefore never reduced when any of those is built.
+#
+# Set FORCE_FULL_VISIBILITY=ON to override the default and export all symbols
+# even from an optimized build.
+option(FORCE_FULL_VISIBILITY
+  "Export all symbols, even from optimized builds (default: hide non-API symbols in optimized builds without the encoder/tools)"
+  OFF)
+
+set(_de265_internal_consumers OFF)
+if(ENABLE_ENCODER OR ENABLE_SHERLOCK265 OR ENABLE_INTERNAL_DEVELOPMENT_TOOLS)
+  set(_de265_internal_consumers ON)
+endif()
+
+set(_de265_optimized_build OFF)
+if(CMAKE_BUILD_TYPE)
+  string(TOUPPER "${CMAKE_BUILD_TYPE}" _de265_build_type_upper)
+  if(NOT _de265_build_type_upper STREQUAL "DEBUG")
+    set(_de265_optimized_build ON)
+  endif()
+endif()
+
+set(DE265_REDUCED_VISIBILITY OFF)
+if(_de265_optimized_build AND NOT _de265_internal_consumers AND NOT FORCE_FULL_VISIBILITY)
+  set(DE265_REDUCED_VISIBILITY ON)
+  set(CMAKE_C_VISIBILITY_PRESET hidden)
+  set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+  set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
+  message(STATUS "Reduced symbol visibility enabled (only LIBDE265_API symbols exported)")
 endif()
 
 add_subdirectory (libde265)

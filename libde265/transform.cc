@@ -110,7 +110,7 @@ void decode_quantization_parameters(thread_context* tctx, int xC,int yC,
   if (tctx->img->available_zscan(xQG,yQG, xQG-1,yQG)) {
     int xTmp = (xQG-1) >> sps.Log2MinTrafoSize;
     int yTmp = (yQG  ) >> sps.Log2MinTrafoSize;
-    int minTbAddrA = pps.MinTbAddrZS[xTmp + yTmp*sps.PicWidthInTbsY];
+    int minTbAddrA = pps.scan->MinTbAddrZS[xTmp + yTmp*sps.PicWidthInTbsY];
     uint32_t ctbAddrA = minTbAddrA >> (2 * (sps.Log2CtbSizeY-sps.Log2MinTrafoSize));
     if (ctbAddrA == tctx->CtbAddrInTS) {
       qPYA = tctx->img->get_QPY(xQG-1,yQG);
@@ -126,7 +126,7 @@ void decode_quantization_parameters(thread_context* tctx, int xC,int yC,
   if (tctx->img->available_zscan(xQG,yQG, xQG,yQG-1)) {
     int xTmp = (xQG  ) >> sps.Log2MinTrafoSize;
     int yTmp = (yQG-1) >> sps.Log2MinTrafoSize;
-    uint32_t minTbAddrB = pps.MinTbAddrZS[xTmp + yTmp*sps.PicWidthInTbsY];
+    uint32_t minTbAddrB = pps.scan->MinTbAddrZS[xTmp + yTmp*sps.PicWidthInTbsY];
     uint32_t ctbAddrB = minTbAddrB >> (2 * (sps.Log2CtbSizeY-sps.Log2MinTrafoSize));
     if (ctbAddrB == tctx->CtbAddrInTS) {
       qPYB = tctx->img->get_QPY(xQG,yQG-1);
@@ -467,19 +467,23 @@ void scale_coefficients_internal(thread_context* tctx,
       const int offset = (1<<(bdShift-1));
       const int fact = m_x_y * levelScale[qP%6] << (qP/6);
 
-      for (int i=0;i<tctx->nCoeff[cIdx];i++) {
-
-        int64_t currCoeff  = tctx->coeffList[cIdx][i];
-
-        //logtrace(LogTransform,"coefficient[%d] = %d\n",tctx->coeffPos[cIdx][i],
-        //tctx->coeffList[cIdx][i]);
-
-        currCoeff = Clip3(-32768,32767,
-                          ( (currCoeff * fact + offset ) >> bdShift));
-
-        //logtrace(LogTransform," -> %d\n",currCoeff);
-
-        tctx->coeffBuf[ tctx->coeffPos[cIdx][i] ] = currCoeff;
+      // Fast path: when coeffList[i]*fact (|coeffList| <= 32767) fits in int32,
+      // the dequant can run in int32 SIMD. Otherwise (very high QP, high bit
+      // depth) fall back to the scalar int64 loop.
+      if (fact <= 32767) {
+        tctx->decctx->acceleration.dequant_coeff_block(tctx->coeffBuf,
+                                                       tctx->coeffList[cIdx],
+                                                       tctx->coeffPos[cIdx],
+                                                       tctx->nCoeff[cIdx],
+                                                       fact, offset, bdShift);
+      }
+      else {
+        for (int i=0;i<tctx->nCoeff[cIdx];i++) {
+          int64_t currCoeff  = tctx->coeffList[cIdx][i];
+          currCoeff = Clip3(-32768,32767,
+                            ( (currCoeff * fact + offset ) >> bdShift));
+          tctx->coeffBuf[ tctx->coeffPos[cIdx][i] ] = currCoeff;
+        }
       }
     }
     else {
@@ -545,8 +549,8 @@ void scale_coefficients_internal(thread_context* tctx,
 
       int extended_precision_processing_flag = 0;
       int Log2nTbS = Log2(nT);
-      int bdShift = libde265_max( 20 - bit_depth, extended_precision_processing_flag ? 11 : 0 );
-      int tsShift = (extended_precision_processing_flag ? libde265_min( 5, bdShift - 2 ) : 5 )
+      int bdShift = std::max( 20 - bit_depth, extended_precision_processing_flag ? 11 : 0 );
+      int tsShift = (extended_precision_processing_flag ? std::min( 5, bdShift - 2 ) : 5 )
         + Log2nTbS;
 
       if (rotateCoeffs) {
@@ -699,7 +703,7 @@ void quant_coefficients(//encoder_context* ectx,
       //logtrace(LogTransform,"(%d,%d) %d -> ", x,y,level);
       sign   = (level < 0 ? -1: 1);
 
-      level = (abs_value(level) * uiQ + rnd ) >> qBits;
+      level = (std::abs(level) * uiQ + rnd ) >> qBits;
       level *= sign;
       out_coeff[blockPos] = Clip3(-32768, 32767, level);
       //logtrace(LogTransform,"%d\n", out_coeff[blockPos]);

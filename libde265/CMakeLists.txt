@@ -10,7 +10,9 @@ set (libde265_sources
   decctx.cc
   dpb.cc
   fallback-dct.cc
-  fallback-motion.cc 
+  fallback-deblk.cc
+  fallback-intrapred.cc
+  fallback-motion.cc
   fallback.cc
   image-io.cc
   image.cc
@@ -47,6 +49,7 @@ set (libde265_headers
   decctx.h
   dpb.h
   fallback-dct.h
+  fallback-intrapred.h
   fallback-motion.h
   fallback.h
   image-io.h
@@ -86,6 +89,13 @@ if(MSVC OR MINGW)
 endif()
 
 add_definitions(-DLIBDE265_EXPORTS)
+
+# With hidden default visibility, LIBDE265_API must expand to
+# visibility("default") so the public C API stays exported. de265.h gates that
+# on HAVE_VISIBILITY (see the symbol-visibility block in the top CMakeLists).
+if(DE265_REDUCED_VISIBILITY)
+  add_definitions(-DHAVE_VISIBILITY)
+endif()
 
 if (ENABLE_ENCODER)
   add_subdirectory (encoder)
